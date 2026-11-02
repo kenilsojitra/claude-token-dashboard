@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Claude Token Admin</title>
+<link rel="stylesheet" href="/common.css">
+</head>
+<body>
+<div class="wrap" id="app"><div class="empty">Loading…</div></div>
+
+<script src="/report.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const C = window.CTD;
+const app = $('#app');
+let ME = null, DATA = null, win = 'today', view = 'list', detailId = null, timer = null, flash = '';
+
+async function api(p, body) {
+  const opt = body === undefined ? {} : {method: 'POST', headers: {'X-Dashboard': '1', 'Content-Type': 'application/json'}, body: JSON.stringify(body)};
+  const r = await fetch(p, opt);
+  let j = {};
+  try { j = await r.json(); } catch (e) {}
+  if (r.status === 401 && p !== '/api/login' && p !== '/api/me') { ME = null; boot(); throw new Error('Please log in again'); }
+  if (!r.ok) throw new Error(j.error || (p + ' ' + r.status));
+  return j;
+}
+const val = (w, cache) => w ? (cache ? w.all : w.io) : 0;
+
+/* ------------------------------------------------ boot / login */
+async function boot() {
+  clearInterval(timer);
+  ME = await api('/api/me');
+  if (ME.setup_needed) return drawSetup();
+  if (!ME.role) return drawLogin();
+  if (ME.role === 'admin') { view = 'list'; await loadAdmin(); timer = setInterval(() => { if (view === 'list') loadAdmin(); else if (view === 'detail') loadDetail(); }, 30000); }
+  else { await loadMine(); timer = setInterval(loadMine, 60000); }
+}
+
+function drawSetup() {
+  app.innerHTML = '<div class="login panel"><h1 style="font-size:18px">Create the admin password</h1>' +
+    '<p class="note">First start. Choose a password for the <b>admin</b> login. You can only do this on this PC.</p>' +
+    '<input type="password" id="p1" placeholder="Password (min 6 characters)" autofocus>' +
+    '<input type="password" id="p2" placeholder="Repeat password">' +
+    '<button class="primary" id="go">Create &amp; continue</button> <span class="err" id="msg"></span></div>';
+  const go = async () => {
+    if ($('#p1').value !== $('#p2').value) { $('#msg').textContent = 'Passwords differ'; return; }
+    try { await api('/api/setup', {password: $('#p1').value}); boot(); } catch (e) { $('#msg').textContent = e.message; }
+  };
+  $('#go').onclick = go;
+  $('#p2').onkeydown = e => { if (e.key === 'Enter') go(); };
+}
+
+function drawLogin() {
+  app.innerHTML = '<div class="login panel"><h1 style="font-size:18px">Claude Token Dashboard</h1>' +
+    '<p class="note">Admin: username <b>admin</b>. Users: your User ID and password (you only see your own usage).</p>' +
+    '<input id="u" placeholder="Username (admin or your User ID)" autofocus autocomplete="username">' +
+    '<input type="password" id="p" placeholder="Password" autocomplete="current-password">' +
+    '<button class="primary" id="go">Log in</button> <span class="err" id="msg"></span></div>';
+  const go = async () => {
+    try { await api('/api/login', {username: $('#u').value, password: $('#p').value}); boot(); } catch (e) { $('#msg').textContent = e.message; }
+  };
+  $('#go').onclick = go;
+  $('#p').onkeydown = e => { if (e.key === 'Enter') go(); };
+}
+
+async function logout() { try { await api('/api/logout', {}); } catch (e) {} boot(); }
+
+/* ------------------------------------------------ admin: user list */
+async function loadAdmin() {
+  try { DATA = await api('/api/users'); } catch (e) { return; }
+  if (view === 'list') drawList();
+}
+
+function statusCell(u) {
+  let dot = 'dot', txt;
+  if (u.status === 'ok') { dot += ' ok'; txt = 'Connected'; }
+  else if (u.status === 'error') { dot += ' bad'; txt = 'Not reachable'; }
+  else { dot += ' warn'; txt = u.host ? 'Waiting for first fetch' : 'Waiting for the PC to appear'; }
+  return '<span class="' + dot + '"></span>' + txt + (u.online ? '<span class="tag ok">online now</span>' : '') +
+    '<div class="note" style="margin:2px 0 0">' + (u.status === 'error' && u.error ? '<span class="err">' + C.esc(u.error) + '</span><br>' : '') +
+    (u.fetched_at ? 'data from ' + C.esc(C.ago(u.fetched_at)) : 'no data yet') + '</div>';
+}
+
+function drawList() {
+  const d = DATA, users = d.users;
+  const sum = k => users.reduce((s, u) => s + (u.windows ? u.windows[k].io : 0), 0);
+  const online = users.filter(u => u.status === 'ok').length;
+  const sorted = users.slice().sort((a, b) => val(b.windows && b.windows[win]) - val(a.windows && a.windows[win]));
+  const max = Math.max(1, ...sorted.map(u => val(u.windows && u.windows[win])));
+  let h = '<header class="top"><h1>Claude Token Dashboard <span class="pc">Admin</span></h1><div>' +
+    '<button class="primary" id="fetchAll">Fetch all now</button> ' +
+    '<button id="addBtn">+ Add user</button> ' +
+    (d.package_available ? '<a class="btn" href="/user-setup.zip">Download User Setup (to share)</a> ' : '') +
+    '<a class="btn" href="/api/export.csv">Export CSV</a> ' +
+    '<button id="pwBtn">Change password</button> <button id="out">Log out</button></div></header>';
+  h += '<div class="status">Automatic fetch every ' + d.interval_minutes + ' min · next: ' + C.esc(C.when(d.next_fetch)) +
+    ' · auto-discovery of user PCs: ' + C.esc(d.discovery) + (flash ? ' · <b>' + C.esc(flash) + '</b>' : '') + '</div>';
+  h += '<div class="cards">' + [['today', 'Today'], ['last_7d', 'Last 7 days'], ['lifetime', 'Lifetime']].map(a =>
+    '<div class="card"><div class="lbl">All users · ' + a[1] + '</div><div class="big">' + C.fmt(sum(a[0])) + '</div><div class="sub">input + output tokens</div></div>').join('') +
+    '<div class="card"><div class="lbl">Users connected</div><div class="big">' + online + ' / ' + users.length + '</div><div class="sub">reachable at the last fetch</div></div></div>';
+
+  h += '<div class="panel hidden" id="addPanel"><h2>Add a user</h2>' +
+    '<p class="note" style="margin-top:0">On the user PC, open the dashboard → <b>Connection to admin</b> tab. Type the User ID and password shown there. The address is optional if the user PC is found automatically.</p>' +
+    '<div class="form-grid"><label>User ID<input id="aUid" placeholder="U7K2M9" autocomplete="off"></label>' +
+    '<label>Password<input id="aPw" placeholder="K7M2X-9QPLB" autocomplete="off"></label>' +
+    '<label>Address shown on the user PC<input id="aHost" placeholder="192.168.1.25:18766"></label>' +
+    '<label>Name / label (optional)<input id="aLabel" placeholder="Rahul - Accounts"></label></div>' +
+    '<p><button class="primary" id="aGo">Add &amp; connect</button> <button id="aCancel">Cancel</button> <span id="aMsg" class="note"></span></p></div>';
+
+  h += '<div class="panel"><div class="toolbar"><h2 style="margin:0">Users</h2><div class="seg" id="winSeg">' +
+    [['today', 'Today'], ['last_4h', 'Last 4h'], ['last_7d', '7 days'], ['lifetime', 'Lifetime']].map(o =>
+      '<button data-w="' + o[0] + '"' + (win === o[0] ? ' class="on"' : '') + '>' + o[1] + '</button>').join('') +
+    '</div><span class="note" style="margin:0">sorted by the selected period · tokens = input + output</span></div>';
+  if (!users.length) h += '<div class="empty">No users yet. Click <b>+ Add user</b>.</div>';
+  else h += '<div class="scroll"><table><tr><th class="l">User</th><th class="l">Status</th>' +
+    [['today', 'Today'], ['last_4h', 'Last 4h'], ['last_7d', '7 days'], ['lifetime', 'Lifetime']].map(o =>
+      '<th' + (o[0] === win ? ' style="color:var(--ink)"' : '') + '>' + o[1] + (o[0] === win ? ' ▼' : '') + '</th>').join('') + '<th></th></tr>' +
+    sorted.map(u => {
+      const w = u.windows || {};
+      const cell = k => '<td title="' + (w[k] ? C.full(w[k].io) : '') + '"' + (k === win ? ' style="font-weight:700"' : '') + '>' + (w[k] ? C.fmt(w[k].io) : '—') + '</td>';
+      return '<tr><td class="l" style="min-width:190px"><b>' + C.esc(u.name) + '</b><div class="note" style="margin:0">' + C.esc(u.user_id) + (u.pc_name ? ' · ' + C.esc(u.pc_name) : '') +
+        (u.host ? ' · ' + C.esc(u.host) + ':' + u.port : '') + '</div><div class="bar"><b style="width:' + (val(w[win]) / max * 100) + '%"></b></div></td><td class="l">' + statusCell(u) + '</td>' +
+        cell('today') + cell('last_4h') + cell('last_7d') + cell('lifetime') +
+        '<td style="white-space:nowrap"><button class="small primary" data-view="' + C.esc(u.user_id) + '">Open</button> ' +
+        '<button class="small" data-fetch="' + C.esc(u.user_id) + '">Fetch</button> ' +
+        '<button class="small" data-edit="' + C.esc(u.user_id) + '">Edit</button> ' +
+        '<button class="small danger" data-del="' + C.esc(u.user_id) + '">Remove</button></td></tr>';
+    }).join('') + '</table></div>';
+  h += '<p class="note">Fetch pulls the user\'s full report (daily, weekly, per-prompt) over the local network. If a PC is switched off, its last fetched data stays here.</p></div>';
+  if (d.lan_access) h += '<div class="panel"><h2>Dashboard on other PCs</h2><p class="note" style="margin-top:0">LAN access is on. Open ' +
+    d.admin_ips.map(i => '<b>http://' + C.esc(i) + ':' + d.port + '/</b>').join(' or ') + ' from another PC. Users can log in there with their own User ID + password and see only their own data. ' +
+    (d.package_available ? 'The User Setup can also be downloaded from <b>/user-setup.zip</b> on that address.' : '') + '</p></div>';
+  app.innerHTML = h;
+  bindList();
+}
+
+function bindList() {
+  $('#out').onclick = logout;
+  $('#fetchAll').onclick = async e => {
+    e.target.disabled = true; e.target.textContent = 'Fetching…';
+    try { const r = await api('/api/fetch-all', {}); const ok = r.results.filter(x => x.ok).length; flash = 'Fetched ' + ok + ' of ' + r.results.length + ' users'; } catch (x) { flash = x.message; }
+    loadAdmin();
+  };
+  $('#addBtn').onclick = () => { $('#addPanel').classList.toggle('hidden'); $('#aUid').focus(); };
+  $('#aCancel').onclick = () => $('#addPanel').classList.add('hidden');
+  $('#aGo').onclick = async () => {
+    $('#aMsg').textContent = 'Connecting…';
+    try {
+      const r = await api('/api/users', {user_id: $('#aUid').value, password: $('#aPw').value, host: $('#aHost').value, label: $('#aLabel').value});
+      flash = r.connected ? 'User added and connected' : r.message;
+      await loadAdmin();
+    } catch (e) { $('#aMsg').innerHTML = '<span class="err">' + C.esc(e.message) + '</span>'; }
+  };
+  $('#pwBtn').onclick = async () => {
+    const o = prompt('Current admin password:'); if (o === null) return;
+    const n = prompt('New admin password (min 6 characters):'); if (n === null) return;
+    try { await api('/api/admin-password', {old: o, new: n}); flash = 'Password changed'; } catch (e) { flash = e.message; }
+    drawList();
+  };
+  document.querySelectorAll('#winSeg button').forEach(b => b.onclick = () => { win = b.dataset.w; drawList(); });
+  document.querySelectorAll('[data-view]').forEach(b => b.onclick = () => openDetail(b.dataset.view));
+  document.querySelectorAll('[data-fetch]').forEach(b => b.onclick = async () => {
+    b.disabled = true; b.textContent = '…';
+    try { const r = await api('/api/users/' + b.dataset.fetch + '/fetch', {}); flash = r.ok ? 'Fetched ' + b.dataset.fetch : r.message; } catch (e) { flash = e.message; }
+    loadAdmin();
+  });
+  document.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => editUser(b.dataset.edit));
+  document.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+    if (!confirm('Remove ' + b.dataset.del + ' and delete the stored data of this user?')) return;
+    await api('/api/users/' + b.dataset.del + '/delete', {}); flash = 'Removed'; loadAdmin();
+  });
+}
+
+async function editUser(uid) {
+  const u = DATA.users.find(x => x.user_id === uid);
+  const host = prompt('IP address of ' + uid + ' (leave empty = find automatically):', u.host ? u.host + (u.port && u.port != DATA.default_user_port ? ':' + u.port : '') : '');
+  if (host === null) return;
+  const label = prompt('Name / label:', u.label || u.name);
+  if (label === null) return;
+  const pw = prompt('New password (only if the user reset it; otherwise leave empty):', '');
+  if (pw === null) return;
+  try { const r = await api('/api/users/' + uid + '/connection', {host, label, password: pw}); flash = r.ok ? 'Saved & connected' : 'Saved. ' + r.message; } catch (e) { flash = e.message; }
+  loadAdmin();
+}
+
+/* ------------------------------------------------ admin: one user */
+async function openDetail(uid) { view = 'detail'; detailId = uid; await loadDetail(); }
+async function loadDetail() {
+  let d;
+  try { d = await api('/api/users/' + detailId); } catch (e) { view = 'list'; return loadAdmin(); }
+  const u = d.user;
+  let h = '<header class="top"><h1>' + C.esc(u.name) + ' <span class="pc">' + C.esc(u.user_id) + '</span></h1><div>' +
+    '<button class="primary" id="f">Fetch now</button> <button id="back">← All users</button> <button id="out">Log out</button></div></header>';
+  h += '<div class="status">' + C.esc(u.pc_name || '') + (u.host ? ' · ' + C.esc(u.host) + ':' + u.port : '') + ' · ' + statusCell(u) + '</div>';
+  h += '<div id="rep"></div>';
+  h += '<div class="panel"><h2>Connection log</h2>' + (d.log.length ? '<table><tr><th class="l">Time</th><th class="l">Result</th></tr>' + d.log.map(l =>
+    '<tr><td class="l">' + C.esc(C.when(l.ts)) + '</td><td class="l">' + (l.ok ? '<span class="okc">OK</span>' : '<span class="err">' + C.esc(l.message) + '</span>') + '</td></tr>').join('') + '</table>' : '<div class="empty">Nothing yet</div>') + '</div>';
+  app.innerHTML = h;
+  C.renderReport($('#rep'), d.report);
+  $('#back').onclick = () => { view = 'list'; loadAdmin(); };
+  $('#out').onclick = logout;
+  $('#f').onclick = async e => { e.target.disabled = true; e.target.textContent = 'Fetching…'; try { await api('/api/users/' + detailId + '/fetch', {}); } catch (x) {} loadDetail(); };
+}
+
+/* ------------------------------------------------ user: own data only */
+async function loadMine() {
+  let d;
+  try { d = await api('/api/my/report'); } catch (e) { return; }
+  const ae = document.activeElement;
+  if (ae && app.contains(ae) && /INPUT|SELECT/.test(ae.tagName) && $('#rep')) return;
+  app.innerHTML = '<header class="top"><h1>My Claude token usage <span class="pc">' + C.esc(d.name) + '</span></h1><div><button id="out">Log out</button></div></header>' +
+    '<div class="status">You can only see your own usage. Data as last fetched by the admin PC: ' + C.esc(C.when(d.fetched_at)) + '</div><div id="rep"></div>';
+  C.renderReport($('#rep'), d.report);
+  $('#out').onclick = logout;
+}
+
+boot();
+</script>
+</body>
+</html>

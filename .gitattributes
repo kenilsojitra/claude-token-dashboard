@@ -1,0 +1,6 @@
+# Windows scripts must have CRLF line endings, also when cloned on Linux/macOS
+*.bat text eol=crlf
+*.vbs text eol=crlf
+*.txt text eol=crlf
+*.sh  text eol=lf
+*.py  text eol=lf

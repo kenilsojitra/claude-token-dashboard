@@ -1,0 +1,8 @@
+# runtime data created on each PC (counts, User ID/password, logs)
+data/
+config.json
+*.log
+*.log.old
+__pycache__/
+*.pyc
+*.zip

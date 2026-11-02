@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>My Claude Token Usage</title>
+<link rel="stylesheet" href="/common.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>My Claude token usage <span class="pc" id="name">…</span></h1>
+    <div><button class="primary" id="scanBtn">Scan now</button></div>
+  </header>
+  <div class="status" id="status">Loading…</div>
+
+  <div class="tabs">
+    <button class="tab on" data-tab="usage">My usage</button>
+    <button class="tab" data-tab="conn">Connection to admin</button>
+  </div>
+
+  <section id="view-usage"><div id="report"></div></section>
+
+  <section id="view-conn" class="hidden">
+    <div id="connBanner"></div>
+
+    <div class="panel">
+      <h2>Your login for the admin</h2>
+      <p class="note" style="margin-top:0">Give these to your admin. The admin types them into the Admin dashboard (<b>Add user</b>) and your PC gets connected.
+        Your PC and the admin PC must be on the same Wi-Fi / LAN.</p>
+      <div class="kv">
+        <div class="k">User ID</div><div><span class="mono" id="uid">…</span> <button class="small" data-copy="uid">Copy</button></div>
+        <div class="k">Password</div><div><span class="mono" id="pw">••••-•••••</span>
+          <button class="small" id="pwShow">Show</button> <button class="small" data-copy="pw">Copy</button></div>
+        <div class="k">This PC's address</div><div><span class="mono" id="ips">…</span> <button class="small" data-copy="ips">Copy</button></div>
+      </div>
+      <p class="note">Type the address (IP:port) in the admin's <b>Add user</b> form. If the admin PC finds this PC by itself, the address is optional.</p>
+    </div>
+
+    <div class="panel">
+      <h2>Settings</h2>
+      <div class="toolbar">
+        <label>Name shown to admin&nbsp; <input id="dname" maxlength="60" style="width:260px"></label>
+        <button id="saveName">Save name</button>
+        <button class="danger" id="resetPw">Reset password</button>
+      </div>
+      <p class="note">Resetting the password disconnects the admin until the new password is entered in the Admin dashboard.</p>
+    </div>
+
+    <div class="panel">
+      <h2>What the admin can see</h2>
+      <p class="note" style="margin-top:0" id="privacy"></p>
+    </div>
+  </section>
+</div>
+
+<script src="/report.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const C = window.CTD;
+let ID = null, showPw = false, firstLoad = true, tab = 'usage';
+
+async function api(p, body) {
+  const opt = body === undefined ? {} : {method: 'POST', headers: {'X-Dashboard': '1', 'Content-Type': 'application/json'}, body: JSON.stringify(body)};
+  const r = await fetch(p, opt);
+  if (!r.ok) throw new Error(p + ' ' + r.status);
+  return r.json();
+}
+
+function renderConn() {
+  if (!ID) return;
+  const p = ID.pairing || {};
+  $('#uid').textContent = ID.user_id;
+  $('#pw').textContent = showPw ? ID.password : ID.password.replace(/[A-Z0-9]/g, '•');
+  $('#pwShow').textContent = showPw ? 'Hide' : 'Show';
+  $('#ips').textContent = ID.sync_port ? (ID.ips || []).map(i => i + ':' + ID.sync_port).join('   or   ') || 'not found' : 'LAN port unavailable';
+  if (document.activeElement !== $('#dname')) $('#dname').value = ID.display_name;
+  $('#privacy').innerHTML = 'Your admin can see: your token counts (today, 4 hours, daily, weekly, lifetime), usage per model and project folder, ' +
+    (ID.share_prompt_text ? 'and the <b>first ~100 characters of each prompt</b> with the tokens it used.' :
+     'and the tokens used per prompt (prompt text is hidden — <code>share_prompt_text</code> is false in config.json).') +
+    ' Nothing else leaves this PC, and nothing goes to the internet.';
+  let b;
+  if (!ID.sync_port) b = '<div class="banner warn"><b>Network port unavailable.</b> The admin cannot reach this PC. Close other programs using ports 18766–18785 and restart.</div>';
+  else if (p.last_contact) b = '<div class="banner ok"><span class="dot ok"></span><b>Connected to admin</b> (' + C.esc(p.admin_ip) + ') — last contact ' + C.esc(C.ago(p.last_contact)) + '.</div>';
+  else b = '<div class="banner warn"><span class="dot warn"></span><b>Not connected yet.</b> Give your User ID and password to the admin and ask them to add you. This page updates by itself.</div>';
+  if (p.last_failed && p.last_failed.ts > (p.last_contact || 0))
+    b += '<div class="banner warn">A connection attempt from ' + C.esc(p.last_failed.ip) + ' was rejected (' + C.esc(p.last_failed.reason) + ') at ' + C.esc(C.when(p.last_failed.ts)) +
+         '. If this is your admin, check the password and that both PC clocks are correct.</div>';
+  $('#connBanner').innerHTML = b;
+}
+
+async function load() {
+  try {
+    const [rep, id] = await Promise.all([api('/api/report'), api('/api/identity')]);
+    ID = id;
+    $('#name').textContent = id.display_name;
+    document.title = 'My Claude usage - ' + id.display_name;
+    const st = id.state;
+    let s = 'User ID ' + id.user_id + ' · Last scan: ' + C.when(st.last_scan) + ' · Next snapshot: ' + C.when(st.next_snapshot);
+    s += st.roots.length ? ' · ' + st.files + ' log files' : ' · ⚠ No Claude Code log folder found on this PC yet';
+    $('#status').innerHTML = C.esc(s) + (st.error ? ' <span class="err">' + C.esc(st.error) + '</span>' : '');
+    const ae = document.activeElement;
+    if (!(ae && $('#report').contains(ae) && /INPUT|SELECT/.test(ae.tagName))) C.renderReport($('#report'), rep);
+    renderConn();
+    if (firstLoad) {
+      firstLoad = false;
+      if (!(id.pairing || {}).last_contact) setTab('conn');
+    }
+  } catch (e) { $('#status').innerHTML = '<span class="err">' + C.esc(e.message) + '</span>'; }
+}
+
+function setTab(t) {
+  tab = t;
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('on', x.dataset.tab === t));
+  $('#view-usage').classList.toggle('hidden', t !== 'usage');
+  $('#view-conn').classList.toggle('hidden', t !== 'conn');
+}
+document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => setTab(t.dataset.tab)));
+
+$('#scanBtn').addEventListener('click', async () => {
+  const b = $('#scanBtn'); b.disabled = true; b.textContent = 'Scanning…';
+  try { await api('/api/scan', {}); } catch (e) {}
+  b.disabled = false; b.textContent = 'Scan now'; load();
+});
+$('#pwShow').addEventListener('click', () => { showPw = !showPw; renderConn(); });
+document.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', async () => {
+  const id = b.dataset.copy;
+  const text = id === 'pw' ? ID.password : id === 'uid' ? ID.user_id : (ID.ips || []).map(i => i + ':' + ID.sync_port).join(', ');
+  try { await navigator.clipboard.writeText(text); b.textContent = 'Copied'; setTimeout(() => b.textContent = 'Copy', 1200); } catch (e) {}
+}));
+$('#saveName').addEventListener('click', async () => { await api('/api/rename', {display_name: $('#dname').value}); load(); });
+$('#resetPw').addEventListener('click', async () => {
+  if (!confirm('Reset the password? The admin will be disconnected until the new password is entered.')) return;
+  await api('/api/reset-password', {}); showPw = true; load();
+});
+
+load();
+setInterval(load, 20000);
+</script>
+</body>
+</html>
